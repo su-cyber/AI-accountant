@@ -1,4 +1,4 @@
-# app.py - Complete Backend with Sheet Selection
+# app.py - Enhanced Financial Compliance Checker
 import os
 import re
 import time
@@ -14,7 +14,6 @@ import faiss
 import uuid
 import tempfile
 import mimetypes
-
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -23,17 +22,15 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.schema import Document
+from langchain.retrievers import BM25Retriever
 from openai import OpenAI
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import uuid
-import asyncio
-
 load_dotenv()
 
 app = FastAPI(
     title="Financial Compliance Checker API",
-    description="Automated compliance verification for financial statements",
-    version="1.1.0"
+    description="Automated compliance verification for financial statements with enhanced accuracy",
+    version="1.2.0"
 )
 
 # CORS middleware
@@ -48,12 +45,20 @@ app.add_middleware(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY not found in environment")
-
-client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1") 
 
 # Global storage for processing jobs
 processing_jobs = {}
 completed_reports = {}
+
+# Constants for accuracy improvements
+SECTION_CATEGORIES = {
+    "valuation": ["accounting_policies", "notes"],
+    "notes": ["notes"],
+    "audit": ["audit_report"],
+    "presentation": ["balance_sheet", "income_statement"],
+    "risk": ["risk_management"]
+}
 
 class ProcessingStatus(BaseModel):
     job_id: str
@@ -81,13 +86,13 @@ class ProcessingStats:
     chunks_created: int = 0
     embeddings_generated: int = 0
     requirements_processed: int = 0
-
+    
     def elapsed_time(self) -> float:
         return time.time() - self.start_time
 
 class CrossEncoderWrapper:
     """Wrapper for CrossEncoder functionality using transformers directly"""
-    def __init__(self, model_name="cross-encoder/ms-marco-MiniLM-L-12-v2", max_length=512):
+    def __init__(self, model_name="cross-encoder/ms-marco-electra-base", max_length=512):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
         self.max_length = max_length
@@ -95,7 +100,7 @@ class CrossEncoderWrapper:
         self.model.to(self.device)
         self.model.eval()
         print(f"✅ Reranker model ready (on {self.device})")
-
+    
     def predict(self, pairs, batch_size=16):
         scores = []
         for i in range(0, len(pairs), batch_size):
@@ -109,14 +114,9 @@ class CrossEncoderWrapper:
                     return_tensors="pt"
                 ).to(self.device)
                 outputs = self.model(**inputs)
-                
-                # Get the relevance score from the model output
                 batch_scores = outputs.logits.squeeze().cpu().numpy().tolist()
-                
-                # Ensure we handle single-item batches correctly
                 if not isinstance(batch_scores, list):
                     batch_scores = [batch_scores]
-                    
                 scores.extend(batch_scores)
         return scores
 
@@ -124,43 +124,49 @@ class AdvancedFinancialRAG:
     def __init__(self, use_gpu: bool = True):
         self.stats = ProcessingStats(start_time=time.time())
         self.device = 'cuda' if torch.cuda.is_available() and use_gpu else 'cpu'
-
-        print(f"\n🚀 Initializing AdvancedFinancialRAG on {self.device}")
-
-        print("🔄 Loading embedding model...")
+        print(f"🚀 Initializing AdvancedFinancialRAG on {self.device}")
+        
+        # Enhanced embedding model
+        print("🔄 Loading BAAI/bge-large-en-v1.5 embedding model...")
         self.embedder = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-mpnet-base-v2",
+            model_name="BAAI/bge-large-en-v1.5",  # Improved semantic similarity
             model_kwargs={"device": self.device},
             encode_kwargs={"batch_size": 16, "normalize_embeddings": True}
         )
         print("✅ Embedding model ready")
-
-        print("🔄 Loading reranker model...")
-        self.reranker = CrossEncoderWrapper()
+        
+        # Enhanced reranker
+        print("🔄 Loading cross-encoder reranker...")
+        self.reranker = CrossEncoderWrapper("cross-encoder/ms-marco-electra-base")
+        
+        # Initialize vector stores
         self.vector_store = None
+        self.bm25_retriever = None
 
     def build_optimized_vector_store(self, documents: List[Document]) -> FAISS:
-        print("🔍 Building optimized vector store...")
+        print("🔍 Building optimized vector store with hybrid retrieval...")
         start_time = time.time()
-
-        # Use FAISS.from_documents to handle document storage properly
-        vector_store = FAISS.from_documents(
+        
+        # FAISS vector store with improved embeddings
+        self.vector_store = FAISS.from_documents(
             documents=documents,
             embedding=self.embedder
         )
         
+        # BM25 keyword-based retriever
+        self.bm25_retriever = BM25Retriever.from_documents(documents)
+        self.bm25_retriever.k = 3
+        
         print(f"✅ Vector store built with {len(documents)} documents in {time.time() - start_time:.2f}s")
-        return vector_store
+        return self.vector_store
 
 def load_and_prepare_checklist(filepath: str, sheet_name: str = "0") -> List[Dict]:
     # Convert to int if it's a digit, otherwise keep as string
     sheet = int(sheet_name) if sheet_name.isdigit() else sheet_name
-    
     try:
         # Get all sheet names
         excel_file = pd.ExcelFile(filepath)
         print(f"📋 Available sheets: {excel_file.sheet_names}")
-        
         # Read the selected sheet
         df = pd.read_excel(filepath, sheet_name=sheet, header=None).fillna("")
         print(f"✅ Loaded sheet: {sheet if isinstance(sheet, int) else sheet_name}")
@@ -169,12 +175,11 @@ def load_and_prepare_checklist(filepath: str, sheet_name: str = "0") -> List[Dic
         # Try to load the first sheet as fallback
         print("🔄 Trying to load first sheet as fallback...")
         df = pd.read_excel(filepath, sheet_name=0, header=None).fillna("")
-    
-    # If the DataFrame is empty, try to load the first sheet
+
     if df.empty:
         print("⚠️ Selected sheet is empty, loading first sheet instead")
         df = pd.read_excel(filepath, sheet_name=0, header=None).fillna("")
-    
+
     # Handle multi-index columns
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.map(lambda x: '_'.join([str(i) for i in x]))
@@ -187,17 +192,17 @@ def load_and_prepare_checklist(filepath: str, sheet_name: str = "0") -> List[Dic
     structured = []
     current_category = current_main = None
     main_id_counter = 0
-
+    
     print("📋 Processing checklist...")
     for idx, row in tqdm(df.iterrows(), total=len(df)):
         text = str(row['A']).strip()
         if not text or text.upper() in ['PRESENTATIE', 'JAARVERSLAGGEVING WAARDERINGSGRONDSLAGEN', 'N/A']:
             continue
-
+            
         if len(text.split()) <= 3 and (text.isupper() or text.startswith('**')):
             current_category = re.sub(r'[\*\:]+', '', text).strip()
             continue
-
+            
         if text.endswith(('.', ':')):
             current_main = {
                 'id': f"main_{main_id_counter}",
@@ -209,7 +214,7 @@ def load_and_prepare_checklist(filepath: str, sheet_name: str = "0") -> List[Dic
             structured.append(current_main)
             main_id_counter += 1
             continue
-
+            
         if any(text.startswith(c) for c in ['-', '•', 'a.', 'b.', 'c.', 'd.', 'e.', 'f.']) and current_main:
             cleaned_text = re.sub(r'^[-•→a-f]\s*\.?\s*', '', text).strip()
             current_main['sub_conditions'].append({
@@ -220,7 +225,7 @@ def load_and_prepare_checklist(filepath: str, sheet_name: str = "0") -> List[Dic
                 'category': current_category,
                 'row_index': idx
             })
-
+    
     requirements = []
     for item in structured:
         requirements.append({
@@ -240,13 +245,14 @@ def load_and_prepare_checklist(filepath: str, sheet_name: str = "0") -> List[Dic
                 'is_main': False,
                 'row_index': sub['row_index']
             })
-
+    
     print(f"✅ Processed {len(requirements)} requirements")
     return requirements
 
 def process_financial_pdf(pdf_path: str) -> List[Document]:
     print(f"📄 Processing PDF: {pdf_path}")
     start_time = time.time()
+    
     section_patterns = {
         'notes': r'toelichting|notes|verklaring',
         'accounting_policies': r'waardering|valuation|grondslagen',
@@ -255,7 +261,7 @@ def process_financial_pdf(pdf_path: str) -> List[Document]:
         'audit_report': r'controleverklaring|audit',
         'risk_management': r'risico|risicobeheer'
     }
-
+    
     documents = []
     with pdfplumber.open(pdf_path) as pdf:
         total_pages = len(pdf.pages)
@@ -263,18 +269,20 @@ def process_financial_pdf(pdf_path: str) -> List[Document]:
             text = page.extract_text() or ""
             if not text.strip():
                 continue
-
+                
             section = "other"
             for sec_name, pattern in section_patterns.items():
                 if re.search(pattern, text, re.IGNORECASE):
                     section = sec_name
                     break
-
+            
+            # Enhanced chunking strategy with better overlap
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1500,
-                chunk_overlap=300,
+                chunk_size=2000,  # Increased chunk size for better context
+                chunk_overlap=500,  # Increased overlap
                 separators=["\n\n", "\n", "(?<=\. )", "; ", ", ", " "]
             )
+            
             chunks = splitter.split_text(text)
             for chunk in chunks:
                 documents.append(Document(
@@ -285,36 +293,78 @@ def process_financial_pdf(pdf_path: str) -> List[Document]:
                         'source': f"Page {i+1}"
                     }
                 ))
+    
     print(f"✅ Created {len(documents)} chunks in {time.time() - start_time:.2f}s")
     return documents
 
-def generate_queries(requirement: str) -> List[str]:
-    return [
-        requirement,
-        requirement.lower(),
-        requirement.replace("waardering", "valuation"),
-        f"Controle of: {requirement}"
-    ]
+def generate_queries(requirement: str, client: OpenAI) -> List[str]:
+    """Generate multiple search queries using LLM paraphrasing"""
+    prompt = f"Generate 5 diverse search queries (in Dutch) to find evidence for this requirement:\n{requirement}"
+    try:
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=200
+        ).choices[0].message.content
+        
+        queries = [q.strip() for q in response.split("\n") if q.strip()]
+        print(f"🔄 Generated {len(queries)} queries for requirement: {requirement[:50]}...")
+        return queries
+    except Exception as e:
+        print(f"⚠️ Fallback to simple queries: {str(e)}")
+        return [
+            requirement,
+            requirement.lower(),
+            requirement.replace("waardering", "valuation"),
+            f"Controle of: {requirement}"
+        ]
 
-def retrieve_evidence(requirement: str, vector_store: FAISS, reranker, top_k=3) -> List[Tuple[Document, float]]:
+def retrieve_evidence(
+    requirement: str, 
+    vector_store: FAISS, 
+    bm25_retriever: BM25Retriever,
+    reranker,
+    req_category: str,
+    top_k=3
+) -> List[Tuple[Document, float]]:
+    """Retrieve evidence using hybrid search with section filtering"""
     docs = []
     scores = []
     
-    # Use similarity_search_with_score to get scores
-    for q in generate_queries(requirement):
+    # Section filtering based on category
+    category_sections = SECTION_CATEGORIES.get(req_category.lower(), [])
+    print(f"🔍 Searching sections {category_sections} for category {req_category}")
+    
+    # Generate diverse queries
+    queries = generate_queries(requirement, client)
+    
+    # Semantic search with FAISS
+    for q in queries:
         try:
             results = vector_store.similarity_search_with_score(q, k=5)
             for doc, score in results:
-                docs.append(doc)
-                scores.append(score)
+                # Apply section filtering
+                if not category_sections or doc.metadata["section"] in category_sections:
+                    docs.append(doc)
+                    scores.append(score)
         except Exception as e:
             print(f"⚠️ Retrieval error for query '{q}': {str(e)}")
             continue
     
+    # Keyword search with BM25
+    try:
+        bm25_results = bm25_retriever.invoke(requirement)
+        for doc in bm25_results:
+            if doc not in docs:  # Avoid duplicates
+                docs.append(doc)
+    except Exception as e:
+        print(f"⚠️ BM25 retrieval error: {str(e)}")
+    
     if not docs:
         return []
     
-    # Create pairs for reranking
+    # Reranking with cross-encoder
     pairs = [(requirement, doc.page_content) for doc in docs]
     try:
         rerank_scores = reranker.predict(pairs, batch_size=16)
@@ -349,14 +399,24 @@ def make_context(evidence: List[Tuple[Document, float]], max_words: int = 1600) 
     return context.strip()
 
 def check_compliance(requirement: str, evidence: List[Tuple[Document, float]]) -> Dict:
+    """Check compliance with enhanced prompt engineering"""
     if not evidence:
         return {"compliance": "Not found", "page": None, "context": None}
-
+    
     context = make_context(evidence)
+    
+    # Enhanced prompt with few-shot examples
     prompt = f"""### Role ###
-You are an expert dutch financial auditor reviewing a dutch annual financial report for a company. Your task is to determine if 
-the report satisfies a specific compliance requirement and identify the single most 
-relevant page where this requirement is addressed.
+You are an expert Dutch financial auditor. Your task is to determine compliance with specific requirements using evidence from the provided context.
+
+### Examples ###
+Requirement: "Waardeverminderingen moeten worden toegepast."
+Context: "[Page 45 | Section: accounting_policies] De onderneming past waardeverminderingen toe volgens IFRS 9."
+Response: Compliance: Found\nPage: 45
+
+Requirement: "Inventaris moet worden geëvalueerd."
+Context: "[Page 30 | Section: balance_sheet] Inventaris is geëvalueerd tegen lager van kost of netto verkoopwaarde."
+Response: Compliance: Found\nPage: 30
 
 ### Requirement ###
 {requirement}
@@ -365,32 +425,34 @@ relevant page where this requirement is addressed.
 {context}
 
 ### Instructions ###
-1. Analyze if the requirement is satisfied (fully or partially) based on the context
-2. If satisfied, respond with the SINGLE most relevant page number (just the number)
-3. If not satisfied, respond with "Not found"
-4. If you think it's even partially satisfied, respond with "Found"
+1. Analyze compliance (fully/partially).
+2. Return the SINGLE most relevant page number.
+3. If not found, respond "Not found".
+4. Prioritize evidence from accounting policies and notes sections.
+5. If partial evidence exists, default to "Found".
 
 ### Response Format ###
 Compliance: [Found/Not found]
-Page: [number/null]
-"""
+Page: [number/null]"""
 
     try:
         response = client.chat.completions.create(
             model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.05,
+            temperature=0.2,  # Reduced temperature for more deterministic output
             max_tokens=128,
             top_p=0.95
         ).choices[0].message.content
-
+        
+        # Parse response
         compliance_match = re.search(r'Compliance:\s*(Found|Not found|Uncertain)', response, re.IGNORECASE)
         page_match = re.search(r'Page:\s*(\d+)', response)
-
+        
         compliance = compliance_match.group(1).capitalize() if compliance_match else "Uncertain"
         page = int(page_match.group(1)) if page_match else None
-
+        
         return {"compliance": compliance, "page": page, "context": context}
+    
     except Exception as e:
         print(f"⚠️ API Error: {str(e)}")
         return {"compliance": "Error", "page": None, "context": None}
@@ -404,32 +466,40 @@ def process_compliance_job(job_id: str, checklist_path: str, pdf_path: str, shee
             progress=0.0,
             message="Loading checklist and PDF..."
         )
-
+        
         # Load checklist with selected sheet
         checklist = load_and_prepare_checklist(checklist_path, sheet_name)
         processing_jobs[job_id].total_requirements = len(checklist)
         processing_jobs[job_id].message = "Processing PDF..."
         processing_jobs[job_id].progress = 10.0
-
+        
         # Process PDF
         documents = process_financial_pdf(pdf_path)
         processing_jobs[job_id].message = "Building vector store..."
         processing_jobs[job_id].progress = 30.0
-
+        
         # Build RAG system
         rag = AdvancedFinancialRAG()
-        rag.vector_store = rag.build_optimized_vector_store(documents)
+        rag.build_optimized_vector_store(documents)
+        
         processing_jobs[job_id].message = "Checking compliance requirements..."
         processing_jobs[job_id].progress = 50.0
-
+        
         results = []
         found_count = 0
-
+        
         for i, req in enumerate(checklist):
             query = req['text'] if req['is_main'] else f"{req['main_condition']}: {req['text']}"
-            evidence = retrieve_evidence(query, rag.vector_store, rag.reranker)
+            evidence = retrieve_evidence(
+                query, 
+                rag.vector_store, 
+                rag.bm25_retriever,
+                rag.reranker,
+                req.get('category', 'other')
+            )
+            
             compliance = check_compliance(query, evidence)
-
+            
             result = {
                 "id": req['id'],
                 "requirement": req['text'],
@@ -442,25 +512,25 @@ def process_compliance_job(job_id: str, checklist_path: str, pdf_path: str, shee
             
             if not req['is_main']:
                 result["main_requirement"] = req['main_condition']
-            
+                
             if compliance["compliance"] == "Found":
                 found_count += 1
                 
             results.append(result)
-
+            
             # Update progress
             progress = 50.0 + (i + 1) / len(checklist) * 45.0
             processing_jobs[job_id].progress = progress
             processing_jobs[job_id].processed_requirements = i + 1
             processing_jobs[job_id].found_count = found_count
-
+        
         # Save results
         df = pd.DataFrame(results)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output_file = f"reports/compliance_report_{job_id}_{timestamp}.xlsx"
         os.makedirs("reports", exist_ok=True)
         df.to_excel(output_file, index=False)
-
+        
         # Mark as completed
         processing_jobs[job_id].status = "completed"
         processing_jobs[job_id].progress = 100.0
@@ -472,7 +542,7 @@ def process_compliance_job(job_id: str, checklist_path: str, pdf_path: str, shee
             "found_count": found_count,
             "total_count": len(results)
         }
-
+        
     except Exception as e:
         processing_jobs[job_id].status = "error"
         processing_jobs[job_id].message = f"Error: {str(e)}"
@@ -491,7 +561,7 @@ async def upload_files(
     # Validate file types
     if checklist.content_type not in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
         raise HTTPException(status_code=400, detail="Checklist must be an Excel file")
-    
+        
     if pdf.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Financial statement must be a PDF file")
     
@@ -502,13 +572,12 @@ async def upload_files(
     
     with open(checklist_path, "wb") as f:
         f.write(await checklist.read())
-    
+        
     with open(pdf_path, "wb") as f:
         f.write(await pdf.read())
     
     # Start background processing with sheet name
     background_tasks.add_task(process_compliance_job, job_id, checklist_path, pdf_path, sheet_name)
-    
     return JSONResponse(content={"job_id": job_id, "message": "Processing started"})
 
 @app.get("/status/{job_id}")
@@ -516,7 +585,6 @@ async def get_job_status(job_id: str):
     """Get processing status"""
     if job_id not in processing_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    
     return processing_jobs[job_id]
 
 @app.get("/results/{job_id}")
@@ -524,7 +592,6 @@ async def get_results(job_id: str):
     """Get processing results"""
     if job_id not in completed_reports:
         raise HTTPException(status_code=404, detail="Results not ready or job not found")
-    
     return completed_reports[job_id]
 
 @app.get("/download/{job_id}")
@@ -532,7 +599,6 @@ async def download_report(job_id: str):
     """Download Excel report"""
     if job_id not in completed_reports:
         raise HTTPException(status_code=404, detail="Report not ready or job not found")
-    
     report_file = completed_reports[job_id]["report_file"]
     
     # Stream the file for better performance with large files
@@ -553,10 +619,9 @@ async def download_report(job_id: str):
 async def get_excel_sheets(job_id: str):
     """Get available sheets from the uploaded Excel file"""
     checklist_path = f"temp/checklist_{job_id}.xlsx"
-    
     if not os.path.exists(checklist_path):
         raise HTTPException(status_code=404, detail="Checklist file not found")
-    
+        
     try:
         excel_file = pd.ExcelFile(checklist_path)
         sheets = [
@@ -570,7 +635,7 @@ async def get_excel_sheets(job_id: str):
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "version": "1.1.0", "timestamp": time.time()}
+    return {"status": "healthy", "version": "1.2.0", "timestamp": time.time()}
 
 @app.on_event("startup")
 async def startup_event():
