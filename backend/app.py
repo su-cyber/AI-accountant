@@ -1,4 +1,4 @@
-# app.py - Enhanced Financial Compliance Checker
+
 import os
 import re
 import time
@@ -124,7 +124,7 @@ class AdvancedFinancialRAG:
     def __init__(self, use_gpu: bool = True):
         self.stats = ProcessingStats(start_time=time.time())
         self.device = 'cuda' if torch.cuda.is_available() and use_gpu else 'cpu'
-        print(f"🚀 Initializing AdvancedFinancialRAG on {self.device}")
+        print(f"🚀 Initializing System on {self.device}")
         
         # Enhanced embedding model
         print("🔄 Loading BAAI/bge-large-en-v1.5 embedding model...")
@@ -278,8 +278,8 @@ def process_financial_pdf(pdf_path: str) -> List[Document]:
             
             # Enhanced chunking strategy with better overlap
             splitter = RecursiveCharacterTextSplitter(
-                chunk_size=2000,  # Increased chunk size for better context
-                chunk_overlap=500,  # Increased overlap
+                chunk_size=2000,  
+                chunk_overlap=500,  
                 separators=["\n\n", "\n", "(?<=\. )", "; ", ", ", " "]
             )
             
@@ -356,7 +356,7 @@ def retrieve_evidence(
     try:
         bm25_results = bm25_retriever.invoke(requirement)
         for doc in bm25_results:
-            if doc not in docs:  # Avoid duplicates
+            if doc not in docs:  
                 docs.append(doc)
     except Exception as e:
         print(f"⚠️ BM25 retrieval error: {str(e)}")
@@ -405,7 +405,6 @@ def check_compliance(requirement: str, evidence: List[Tuple[Document, float]]) -
     
     context = make_context(evidence)
     
-    # Enhanced prompt with few-shot examples
     prompt = f"""### Role ###
 You are an expert Dutch financial auditor. Your task is to determine compliance with specific requirements using evidence from the provided context.
 
@@ -439,7 +438,7 @@ Page: [number/null]"""
         response = client.chat.completions.create(
             model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,  # Reduced temperature for more deterministic output
+            temperature=0.2,  
             max_tokens=128,
             top_p=0.95
         ).choices[0].message.content
@@ -553,7 +552,7 @@ async def upload_files(
     background_tasks: BackgroundTasks,
     checklist: UploadFile = File(...),
     pdf: UploadFile = File(...),
-    sheet_name: str = Form("0")  # Default to first sheet
+    sheet_name: str = Form("0")  
 ):
     """Upload files and start processing with sheet selection"""
     job_id = str(uuid.uuid4())
