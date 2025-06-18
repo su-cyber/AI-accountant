@@ -1,0 +1,17 @@
+@import '../styles/tailwind.css';
+@import "tailwindcss";
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  background-color: #f9fafb;
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: optional;
+  src: url('/fonts/inter-var-latin.woff2') format('woff2');
+}

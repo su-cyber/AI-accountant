@@ -1,0 +1,24 @@
+.dark {
+  color-scheme: dark;
+}
+
+.dark body {
+  --bg-primary: #111827;
+  --bg-secondary: #1f2937;
+  --text-primary: #f9fafb;
+  --text-secondary: #e5e7eb;
+  --border-color: #374151;
+}
+
+.light body {
+  --bg-primary: #f9fafb;
+  --bg-secondary: #ffffff;
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --border-color: #e5e7eb;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
