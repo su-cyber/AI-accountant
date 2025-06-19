@@ -6,6 +6,7 @@ export const uploadFiles = async (checklist: File, pdf: File, sheetName: string)
   const formData = new FormData();
   formData.append('checklist', checklist);
   formData.append('pdf', pdf);
+  formData.append('sheet_name', sheetName);
   
   const response = await axios.post(`${API_URL}/upload`, formData, {
     headers: { 'Content-Type': 'multipart/form-data' }

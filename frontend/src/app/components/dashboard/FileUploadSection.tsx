@@ -35,6 +35,7 @@ export const FileUploadSection = ({
   const handleSubmit = useCallback(() => {
     if (checklist && pdf) {
       onUpload(checklist, pdf, sheetName);
+      
     }
   }, [checklist, pdf, sheetName, onUpload]);
 
